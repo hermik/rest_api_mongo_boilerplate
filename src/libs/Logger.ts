@@ -7,6 +7,9 @@ export default class Logger {
 	public static info = (message: any) => {
 		console.log(chalk.blue(this.injectTimestamp(message)));
 	};
+	public static success = (message: any) => {
+		console.log(chalk.green(this.injectTimestamp(message)));
+	};
 	public static warn = (message: any) => {
 		console.log(chalk.yellow(this.injectTimestamp(message)));
 	};
