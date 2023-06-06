@@ -4,40 +4,51 @@ import mongoose from 'mongoose';
 import { config } from './config/config';
 import Logger from './libs/Logger';
 import responseTime from 'response-time';
-import jwt, { Secret } from 'jsonwebtoken';
 
 /* routes */
 import subscriberRoutes from './routes/subscribers';
 import itemRoutes from './routes/items';
-
-// import authenticate from './middleware/authenticate';
+import apiUserRoutes from './routes/api_user';
+/* middlewares  for authentication */
+import { Authenticate, RestricedPermissions } from './middleware/authenticate';
+import { NeedDB } from './middleware/need_db';
 
 import { version } from '../package.json';
 
 const app = express();
 
 //MoongoDB connection
-Logger.info('Attempting to connect to MongoDB. at ' + config.mongo.url);
-mongoose
-	.connect(config.mongo.url, { w: 'majority', retryWrites: true })
-	.then(() => {
-		Logger.info('Connected to MongoDB successfully');
-	})
-	.catch((error) => {
-		Logger.error(error);
-	});
+
+const connectWithRetry = () => {
+	Logger.info('Attempting to connect to MongoDB. at ' + config.mongo.url);
+	return mongoose
+		.connect(config.mongo.url, { w: 'majority', retryWrites: true })
+		.then(() => {
+			Logger.success('Connected to MongoDB successfully');
+		})
+		.catch((error) => {
+			Logger.error('Failed to connect to MongoDB - retrying in 5 sec (' + error + ')');
+			setTimeout(connectWithRetry, 5000);
+		});
+};
+
+connectWithRetry();
 
 const StartServer = () => {
 	app.use(responseTime()); //add response time header
 	app.use(express.urlencoded({ extended: true }));
 	app.use(express.json());
-
-	app.use((req, res, next) => {
+	/* log requests in console */
+	app.use((req: Request, res: Response, next: NextFunction) => {
 		let ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-		Logger.info(`[${ip}] Incomming -> Method: [${req.method}] - URL: [${req.url}]`);
+		//remove passwords from logs
+		let logsBody = Object.assign({}, req.body);
+		if (typeof logsBody.password != undefined) {
+			delete logsBody.password;
+		}
+		Logger.info(`[${ip}] In -> [${req.method}] ${req.url}` + ' ' + JSON.stringify(logsBody));
 		next();
 	});
-
 	/** API DEFAULT HEADER AND ACCESS CONTROL HEADERS */
 	app.use((req: Request, res: Response, next: NextFunction) => {
 		res.header('X-Powered-By', 'Rest API version: ' + version);
@@ -53,51 +64,23 @@ const StartServer = () => {
 	/** API MAIN ROUTES */
 	app.use('/subscribers', subscriberRoutes);
 	app.use('/items', itemRoutes);
+	app.use('/api_user', apiUserRoutes);
 
 	/** HEALTH CHECK */
-	app.get('/ping', (req: Request, res: Response) => res.status(200).json({ message: 'pong ' + `[Local time: ${new Date().toLocaleString()}]` }));
+	app.get('/ping', (req: Request, res: Response) => {
+		return res.status(200).json({ message: 'pong ' + `[Local time: ${new Date().toLocaleString()}]` });
+	});
 
-	// /** authorization */
-	// app.post('/login', (req: Request, res: Response) => {
-	// 	const username = req.body.username;
-	// 	const created = new Date().toLocaleString();
-	// 	const user = { username, created };
-	// 	const accessToken = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET as Secret);
-	// 	res.status(200).json({ user: user, accessToken: accessToken });
-	// });
-	// /** authorization */
-	// app.post('/generatelicense', async (req: Request, res: Response) => {
-	// 	const owner = req.body.owner || 'Company';
-	// 	const expires = req.body.expires || new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toJSON().slice(0, 10);
-	// 	const features = req.body.features || ['_ALL_'];
-	// 	const type = req.body.customer || 'customer';
-
-	// 	const licensePayload = {
-	// 		owner: owner,
-	// 		expires: expires,
-	// 		created: new Date().toJSON().slice(0, 19).replace('T', ' '),
-	// 		features: features,
-	// 		type: type
-	// 	};
-	// 	const accessToken = jwt.sign(licensePayload, process.env.ACCESS_TOKEN_SECRET as Secret);
-
-	// 	const license = new LicenseModel({
-	// 		_id: new mongoose.Types.ObjectId(),
-	// 		token: accessToken,
-	// 		...licensePayload
-	// 	});
-	// 	return await license
-	// 		.save()
-	// 		.then((license) => res.status(201).json(license))
-	// 		.catch((error) => res.status(500).json({ error }));
-	// 	//res.status(200).json({ licensePayload, accessToken: accessToken });
-	// });
+	/** Just for testing purpose - authenticate only for group admin */
+	app.get('/test_permissions', NeedDB, Authenticate, RestricedPermissions(['admin']), (req: Request, res: Response) => {
+		return res.status(200).json({ message: 'OK you are admin logged in', user: req.user });
+	});
 
 	/** 404 STATUS HANDLING */
-	app.use((req, res, next) => {
-		const error = new Error('not found');
+	app.use((req: Request, res: Response, next: NextFunction) => {
+		const error = new Error('404 not found');
 		Logger.error(error);
-		return res.status(404).json({ message: error.message });
+		return res.status(404).json({ error: error.message });
 	});
 
 	app.listen(config.server.port, () => Logger.info(`API server started on port ${config.server.port}`));
