@@ -45,5 +45,5 @@ const UserSchema: Schema = new Schema({
 		default: Date.now
 	}
 });
-
+UserSchema.index({ '$**': 'text' });
 export default mongoose.model<IApiUser>('User', UserSchema);

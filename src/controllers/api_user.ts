@@ -24,7 +24,7 @@ const createNew = async (req: Request, res: Response, next: NextFunction) => {
 		.then((item: any) => res.status(201).json({ item }))
 		.catch((error: any) => {
 			Logger.error(error);
-			return res.status(500).json({ error });
+			return res.status(400).json({ error });
 		});
 };
 
@@ -51,11 +51,42 @@ const getByID = (req: Request, res: Response, next: NextFunction) => {
  * @param next
  */
 const readAll = (req: Request, res: Response, next: NextFunction) => {
-	User.find()
-		.then((item: any) => res.status(201).json({ item }))
-		.catch((error: any) => {
-			Logger.error(error);
-			return res.status(500).json({ error });
+	let limit: number;
+	// @ts-ignore
+	limit = req.query.hasOwnProperty('_limit') ? parseInt(req.query._limit) : 0;
+	// @ts-ignore
+	let skip = req.query.hasOwnProperty('_page') ? req.query._page * req.query._limit - req.query._limit : 0;
+
+	//produce find object for mongo. if q is passed use fulltext, otherwise
+	//iterateh
+	let find = {};
+	if (req.query.hasOwnProperty('q') && req.query.q != '') {
+		find = { $text: { $search: req.query.q } };
+	} else {
+		for (const [key, value] of Object.entries(req.query)) {
+			if (User.schema.paths.hasOwnProperty(key)) {
+				let regex = new RegExp('' + req.query[key] + '', 'i');
+				//@ts-ignore
+				find[key] = { $regex: regex };
+			}
+		}
+	}
+
+	User.find(find)
+		.skip(skip)
+		.limit(limit)
+		.sort(getSortFromRequest(req))
+
+		.exec(function (err, items) {
+			User.count().exec(function (err, count) {
+				let rowCount = count.toString();
+				res.append('X-Total-Count', rowCount);
+				if (err) {
+					res.status(500).json(err);
+					return;
+				}
+				res.status(200).json(items);
+			});
 		});
 };
 
@@ -91,7 +122,9 @@ const updateByID = async (req: Request, res: Response, next: NextFunction) => {
  */
 const deleteByID = async (req: Request, res: Response) => {
 	const id = req.params.id;
-	return await User.findByIdAndDelete(id).then((item: any) => (item ? res.status(201).json({ message: 'deleted' }) : res.status(404).json({ message: 'not found' })));
+	const ids = id.split(',');
+	const filter = { _id: { $in: ids } };
+	return await User.deleteMany(filter).then((item: any) => (item ? res.status(201).json({ message: 'deleted' }) : res.status(404).json({ message: 'not found' })));
 };
 
 /**
@@ -110,6 +143,14 @@ const loginUser = (req: Request, res: Response, next: NextFunction) => {
 	const refreshToken = jwt.sign(user, process.env.REFRESH_TOKEN_SECRET as Secret);
 	//refreshTokens.push(refreshToken);
 	res.status(200).json({ message, user, accessToken, refreshToken });
+};
+
+const getSortFromRequest = (req: Request): any => {
+	const order = req.query.hasOwnProperty('_order') && req.query._order == 'desc' ? -1 : 1;
+	const sort = req.query.hasOwnProperty('_sort') ? req.query._sort : null;
+	let sortarray = [sort, order];
+	console.log(sortarray);
+	return [sortarray];
 };
 
 export default { createNew, getByID, readAll, deleteByID, updateByID, loginUser };
