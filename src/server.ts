@@ -14,6 +14,7 @@ import { Authenticate, RestricedPermissions } from './middleware/authenticate';
 import { NeedDB } from './middleware/need_db';
 
 import { version } from '../package.json';
+import './workers/item.worker';
 
 const app = express();
 
