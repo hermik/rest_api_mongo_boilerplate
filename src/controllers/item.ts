@@ -1,7 +1,8 @@
 import { NextFunction, Request, Response } from 'express';
 import mongoose from 'mongoose';
 import Item from '../models/item';
-import { getDeleteItemJobId, itemQueue, scheduleItemDeletion } from '../queues/item.queue';
+import DeferredOperation from '../models/deferred_operation';
+import { ITEM_DELETE_DELAY_MS, scheduleItemDeletion } from '../queues/item.queue';
 
 const createNew = async (req: Request, res: Response, next: NextFunction) => {
 	const { name, subscribedTo } = req.body;
@@ -47,13 +48,42 @@ const deleteByID = async (req: Request, res: Response, next: NextFunction) => {
 			return res.status(404).json({ message: 'not found' });
 		}
 
-		const job = await scheduleItemDeletion(id);
-		return res.status(202).json({
-			message: 'delete scheduled',
+		const existingOperation = await DeferredOperation.findOne({
 			itemId: id,
-			jobId: job.id,
-			undoWithinMs: 5000
+			type: 'delete-item',
+			status: { $in: ['pending', 'processing'] }
+		}).sort({ createdAt: -1 });
+
+		if (existingOperation) {
+			return res.status(409).json({
+				message: 'delete already scheduled',
+				itemId: id,
+				operationId: existingOperation.id,
+				status: existingOperation.status
+			});
+		}
+
+		const operation = await DeferredOperation.create({
+			itemId: id,
+			type: 'delete-item',
+			status: 'pending'
 		});
+
+		try {
+			const job = await scheduleItemDeletion(operation.id);
+			return res.status(202).json({
+				message: 'delete scheduled',
+				itemId: id,
+				operationId: operation.id,
+				jobId: job.id,
+				status: operation.status,
+				undoWithinMs: ITEM_DELETE_DELAY_MS
+			});
+		} catch (error) {
+			operation.status = 'cancelled';
+			await operation.save();
+			throw error;
+		}
 	} catch (error) {
 		return res.status(500).json({ error });
 	}
@@ -63,18 +93,40 @@ const undoDeleteByID = async (req: Request, res: Response, next: NextFunction) =
 	const id = req.params.id;
 
 	try {
-		const job = await itemQueue.getJob(getDeleteItemJobId(id));
-		if (!job) {
-			return res.status(409).json({ message: 'delete cannot be undone' });
+		const operation = await DeferredOperation.findOneAndUpdate(
+			{
+				itemId: id,
+				type: 'delete-item',
+				status: 'pending'
+			},
+			{
+				$set: { status: 'cancelled' }
+			},
+			{
+				new: true,
+				sort: { createdAt: -1 }
+			}
+		);
+
+		if (operation) {
+			return res.status(200).json({
+				message: 'delete cancelled',
+				itemId: id,
+				operationId: operation.id,
+				status: operation.status
+			});
 		}
 
-		const state = await job.getState();
-		if (state !== 'delayed' && state !== 'waiting') {
-			return res.status(409).json({ message: 'delete cannot be undone', state });
-		}
+		const latestOperation = await DeferredOperation.findOne({
+			itemId: id,
+			type: 'delete-item'
+		}).sort({ createdAt: -1 });
 
-		await job.remove();
-		return res.status(200).json({ message: 'delete cancelled', itemId: id });
+		return res.status(409).json({
+			message: 'delete cannot be undone',
+			itemId: id,
+			status: latestOperation?.status || 'not-found'
+		});
 	} catch (error) {
 		return res.status(500).json({ error });
 	}
